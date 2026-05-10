@@ -6,5 +6,5 @@ yake
 nltk
 langdetect
 jieba
-requests
 reportlab
+tencentcloud-sdk-python
