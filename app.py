@@ -14,12 +14,31 @@ import jieba
 import tempfile
 import os
 
-# ---------------------------- 页面配置与隐藏默认UI ----------------------------
+# ---------------------------- 页面配置与自定义样式 ----------------------------
 st.set_page_config(page_title="文献伴侣 · 对话版", page_icon="📚", layout="centered")
 
-# 隐藏 Streamlit 默认的顶部栏、菜单、脚注等，实现极简风格
-hide_streamlit_style = """
+# 强制覆盖所有文字颜色为深色，修复白色字体问题
+fix_white_text_style = """
     <style>
+        /* 全局文字颜色 */
+        html, body, .stApp, .stApp * {
+            color: #1e293b !important;
+        }
+        /* 输入框文字颜色 */
+        .stTextInput input, .stTextArea textarea, .stSelectbox select, .stMultiselect span {
+            color: #1e293b !important;
+            background-color: #ffffff !important;
+        }
+        /* 按钮文字颜色 */
+        .stButton button {
+            color: #1e293b !important;
+            background-color: #f0f2f6 !important;
+            border: 1px solid #cbd5e1 !important;
+        }
+        .stButton button:hover {
+            background-color: #e2e8f0 !important;
+        }
+        /* 隐藏默认UI元素 */
         #MainMenu {visibility: hidden;}
         header {visibility: hidden;}
         footer {visibility: hidden;}
@@ -31,18 +50,15 @@ hide_streamlit_style = """
         [data-testid="stToolbar"] {display: none;}
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stStatusWidget"] {display: none;}
-        .reportview-container .main .block-container {
-            padding-top: 2rem;
-            padding-bottom: 2rem;
-        }
         /* 聊天消息样式 */
         .chat-message-user {
-            background-color: #e0f2fe;
+            background-color: #dbeafe;
             padding: 12px;
             border-radius: 20px;
             margin-bottom: 12px;
             max-width: 80%;
             align-self: flex-end;
+            color: #1e293b !important;
         }
         .chat-message-assistant {
             background-color: #f1f5f9;
@@ -51,20 +67,32 @@ hide_streamlit_style = """
             margin-bottom: 12px;
             max-width: 80%;
             align-self: flex-start;
+            color: #1e293b !important;
+        }
+        /* 链接颜色（若有） */
+        a {
+            color: #2563eb !important;
+        }
+        /* 标题颜色 */
+        h1, h2, h3, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3 {
+            color: #0f172a !important;
+        }
+        /* 文件上传器文字 */
+        .stFileUploader label, .stFileUploader span {
+            color: #1e293b !important;
         }
     </style>
 """
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+st.markdown(fix_white_text_style, unsafe_allow_html=True)
 
-# 标题（保留简洁标题）
 st.title("📚 文献伴侣 · 对话版")
 st.caption("华师大·学习智能体 | 总结论文 | 提取关键词 | 生成引用")
 
 # ---------------------------- 初始化会话状态 ----------------------------
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # 存储 {"role": "user"/"assistant", "content": "..."}
+    st.session_state.chat_history = []
 if "step" not in st.session_state:
-    st.session_state.step = "start"  # start, await_text, await_metadata, done
+    st.session_state.step = "start"
 if "paper_text" not in st.session_state:
     st.session_state.paper_text = ""
 if "paper_lang" not in st.session_state:
@@ -100,7 +128,7 @@ def extract_text_from_pdf(uploaded_file):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-        if not text.strip():  # 回退到 PyPDF2
+        if not text.strip():
             reader = PdfReader(tmp_path)
             for page in reader.pages:
                 page_text = page.extract_text()
@@ -137,7 +165,6 @@ def extract_keywords(text, lang, num_keywords=3):
         return []
 
 def format_citations(authors, title, year, journal, volume, pages):
-    # 简化的格式化，支持中英文作者
     author_list = []
     for item in authors.split(';'):
         name = item.strip()
@@ -196,11 +223,8 @@ def format_citations(authors, title, year, journal, volume, pages):
 
 # ---------------------------- 对话逻辑 ----------------------------
 def process_user_input(user_input):
-    """根据当前步骤处理用户输入，返回助手回复（文本）"""
-    global st_state
     step = st.session_state.step
 
-    # 开始：选择模式
     if step == "start":
         if user_input == "1":
             st.session_state.step = "await_text"
@@ -211,7 +235,6 @@ def process_user_input(user_input):
         else:
             return "请输入数字 1 或 2：\n1️⃣ 粘贴文本\n2️⃣ 上传 PDF 文件"
 
-    # 等待文本输入（多行，以END结束）
     elif step == "await_text":
         if user_input.strip().upper() == "END":
             text = st.session_state.pending_text
@@ -221,27 +244,20 @@ def process_user_input(user_input):
             st.session_state.step = "analyzing"
             return analyze_paper(text)
         else:
-            # 累积文本
             if "pending_text" not in st.session_state:
                 st.session_state.pending_text = ""
             st.session_state.pending_text += user_input + "\n"
             return f"已接收文本片段（当前共 {len(st.session_state.pending_text)} 字符），继续粘贴，输入 END 结束。"
 
-    # 等待 PDF 上传
     elif step == "await_pdf":
-        # 这个步骤实际上不通过文本输入处理，而是通过单独的 file_uploader 组件
-        return None  # 不产生回复，由外部上传触发
+        return None
 
-    # 分析完成后，等待元数据
     elif step == "await_metadata":
-        # 用户输入的是某个元数据字段的值
         meta = st.session_state.citation_meta
-        # 记录当前正在请求的字段
         if "meta_field" not in st.session_state:
             st.session_state.meta_field = "title"
         field = st.session_state.meta_field
         meta[field] = user_input
-        # 切换到下一个字段
         if field == "title":
             st.session_state.meta_field = "authors"
             return "请输入作者（多个作者用英文分号 ; 分隔，例如：Zhang, Wei; Li, Ming）"
@@ -268,7 +284,6 @@ def process_user_input(user_input):
                 meta["pages"] = ""
             else:
                 meta["pages"] = pages
-            # 所有信息收集完毕，生成引用
             apa, mla = format_citations(
                 meta.get("authors", ""),
                 meta.get("title", ""),
@@ -288,10 +303,8 @@ def process_user_input(user_input):
             st.session_state.step = "done"
             return result
 
-    # 已完成，可以重置
     elif step == "done":
         if user_input.strip() == "新对话":
-            # 重置所有状态
             for key in ["step", "paper_text", "paper_lang", "summary_core", "summary_detail", "keywords", "citation_meta", "pending_text", "meta_field"]:
                 if key in st.session_state:
                     del st.session_state[key]
@@ -324,14 +337,12 @@ def analyze_paper(text):
     )
 
 # ---------------------------- 渲染聊天界面 ----------------------------
-# 显示历史消息
 for msg in st.session_state.chat_history:
     if msg["role"] == "user":
         st.markdown(f"<div style='display: flex; justify-content: flex-end;'><div class='chat-message-user'>🧑‍🎓 {msg['content']}</div></div>", unsafe_allow_html=True)
     else:
         st.markdown(f"<div style='display: flex; justify-content: flex-start;'><div class='chat-message-assistant'>🤖 {msg['content']}</div></div>", unsafe_allow_html=True)
 
-# 特殊处理：如果当前步骤是 await_pdf，显示文件上传组件
 if st.session_state.step == "await_pdf":
     uploaded_file = st.file_uploader("📄 上传 PDF 文件", type="pdf", key="pdf_uploader")
     if uploaded_file:
@@ -339,14 +350,12 @@ if st.session_state.step == "await_pdf":
             text = extract_text_from_pdf(uploaded_file)
             if text:
                 add_message("assistant", f"✅ PDF 已读取，共 {len(text)} 字符。正在分析...")
-                # 直接分析
                 response = analyze_paper(text)
                 add_message("assistant", response)
                 st.rerun()
             else:
                 st.error("PDF 无法提取文字，请尝试文本模式。")
 
-# 用户输入框（放在底部固定）
 with st.container():
     col1, col2 = st.columns([5, 1])
     with col1:
@@ -355,16 +364,12 @@ with st.container():
         send_btn = st.button("发送")
 
 if send_btn and user_input.strip():
-    # 添加用户消息
     add_message("user", user_input)
-    # 处理并获取助手回复
     assistant_reply = process_user_input(user_input.strip())
     if assistant_reply:
         add_message("assistant", assistant_reply)
-    # 清空输入框并刷新
     st.rerun()
 
-# 初始欢迎消息（如果没有历史）
 if len(st.session_state.chat_history) == 0:
     welcome = "你好！我是文献伴侣智能体，你可以粘贴论文文本或上传PDF，我会为你生成摘要、关键词和引用格式。\n\n请选择输入方式：\n1️⃣ 粘贴文本\n2️⃣ 上传 PDF 文件"
     add_message("assistant", welcome)
