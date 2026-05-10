@@ -107,17 +107,48 @@ def extract_text_from_pdf(uploaded_file):
     os.unlink(tmp_path)
     return text.strip()
 
-# ---------------- 腾讯云翻译（使用官方SDK，稳定可靠） ----------------
+# ---------------- 腾讯云翻译（分块处理，解决长文本问题） ----------------
+def translate_single_chunk(text, src, tgt, client):
+    """翻译单个文本块（不超过6000字符）"""
+    req = models.TextTranslateRequest()
+    req.SourceText = text
+    req.Source = src.upper()
+    req.Target = tgt.upper()
+    req.ProjectId = 0
+    resp = client.TextTranslate(req)
+    return resp.TargetText
+
+def split_text_into_chunks(text, max_len=5900):
+    """将长文本按句子边界分割成多个块，每块不超过max_len"""
+    if len(text) <= max_len:
+        return [text]
+    # 按句子分割（中英文都适用的简单分割）
+    sentences = re.split(r'(?<=[。！？!?.])\s*', text)
+    chunks = []
+    current_chunk = ""
+    for sent in sentences:
+        if len(current_chunk) + len(sent) + 1 <= max_len:
+            if current_chunk:
+                current_chunk += " " + sent
+            else:
+                current_chunk = sent
+        else:
+            if current_chunk:
+                chunks.append(current_chunk)
+            current_chunk = sent
+    if current_chunk:
+        chunks.append(current_chunk)
+    return chunks
+
 def translate_text(text, src_lang, target_lang):
-    """使用腾讯云 SDK 翻译文本，自动处理签名，返回译文"""
+    """翻译文本，自动分块处理长文本"""
     if not text or not text.strip():
         return ""
 
-    # 映射语言代码（腾讯云要求大写）
     src = 'zh' if src_lang == 'zh' else 'en'
     tgt = 'zh' if target_lang == 'en' else 'en'
 
-    # 获取密钥（优先从 Streamlit secrets，其次从环境变量）
+    # 获取密钥
     secret_id = None
     secret_key = None
     try:
@@ -128,7 +159,7 @@ def translate_text(text, src_lang, target_lang):
         secret_key = os.environ.get("TENCENT_SECRET_KEY")
 
     if not secret_id or not secret_key:
-        return "[错误] 未找到腾讯云 API 密钥，请在 Streamlit Cloud 的 Secrets 中配置 TENCENT_SECRET_ID 和 TENCENT_SECRET_KEY"
+        return "[错误] 未找到腾讯云 API 密钥，请在 Streamlit Cloud 的 Secrets 中配置"
 
     try:
         cred = credential.Credential(secret_id, secret_key)
@@ -138,17 +169,17 @@ def translate_text(text, src_lang, target_lang):
         client_profile.httpProfile = http_profile
         client = tmt_client.TmtClient(cred, "ap-guangzhou", client_profile)
 
-        req = models.TextTranslateRequest()
-        req.SourceText = text
-        req.Source = src.upper()
-        req.Target = tgt.upper()
-        req.ProjectId = 0
-
-        resp = client.TextTranslate(req)
-        return resp.TargetText
+        # 分块处理
+        chunks = split_text_into_chunks(text, max_len=5900)
+        translated_chunks = []
+        for chunk in chunks:
+            if chunk.strip():
+                translated = translate_single_chunk(chunk, src, tgt, client)
+                translated_chunks.append(translated)
+        return " ".join(translated_chunks)
     except Exception as e:
         st.error(f"翻译接口调用失败: {str(e)}")
-        return f"[翻译失败] {text[:50]}..."
+        return f"[翻译失败] {text[:100]}..."
 
 # ---------- 自动元数据提取 ----------
 def extract_title(text):
@@ -261,7 +292,6 @@ def analyze_paper_bilingual(text):
     core = sentences[0] if sentences else "（无法生成摘要）"
     detail = " ".join(sentences[1:4]) if len(sentences) > 1 else ""
     kw = extract_keywords(text, lang)
-    # 翻译
     target = "zh" if lang == "en" else "en"
     core_trans = translate_text(core, lang, target)
     detail_trans = translate_text(detail, lang, target)
