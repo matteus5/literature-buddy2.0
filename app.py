@@ -14,9 +14,73 @@ import jieba
 import tempfile
 import os
 
-st.set_page_config(page_title="文献伴侣", page_icon="📚")
-st.title("📚 文献伴侣智能体")
-st.markdown("总结论文摘要 · 提取关键观点 · 生成 APA/MLA 引用")
+# ---------------------------- 页面配置与隐藏默认UI ----------------------------
+st.set_page_config(page_title="文献伴侣 · 对话版", page_icon="📚", layout="centered")
+
+# 隐藏 Streamlit 默认的顶部栏、菜单、脚注等，实现极简风格
+hide_streamlit_style = """
+    <style>
+        #MainMenu {visibility: hidden;}
+        header {visibility: hidden;}
+        footer {visibility: hidden;}
+        .stAppHeader {display: none;}
+        .stDeployButton {display: none;}
+        .stActionButton {display: none;}
+        .stStatusWidget {display: none;}
+        .viewerBadge_link__qRIco {display: none;}
+        [data-testid="stToolbar"] {display: none;}
+        [data-testid="stDecoration"] {display: none;}
+        [data-testid="stStatusWidget"] {display: none;}
+        .reportview-container .main .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        /* 聊天消息样式 */
+        .chat-message-user {
+            background-color: #e0f2fe;
+            padding: 12px;
+            border-radius: 20px;
+            margin-bottom: 12px;
+            max-width: 80%;
+            align-self: flex-end;
+        }
+        .chat-message-assistant {
+            background-color: #f1f5f9;
+            padding: 12px;
+            border-radius: 20px;
+            margin-bottom: 12px;
+            max-width: 80%;
+            align-self: flex-start;
+        }
+    </style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
+# 标题（保留简洁标题）
+st.title("📚 文献伴侣 · 对话版")
+st.caption("华师大·学习智能体 | 总结论文 | 提取关键词 | 生成引用")
+
+# ---------------------------- 初始化会话状态 ----------------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []  # 存储 {"role": "user"/"assistant", "content": "..."}
+if "step" not in st.session_state:
+    st.session_state.step = "start"  # start, await_text, await_metadata, done
+if "paper_text" not in st.session_state:
+    st.session_state.paper_text = ""
+if "paper_lang" not in st.session_state:
+    st.session_state.paper_lang = "en"
+if "summary_core" not in st.session_state:
+    st.session_state.summary_core = ""
+if "summary_detail" not in st.session_state:
+    st.session_state.summary_detail = ""
+if "keywords" not in st.session_state:
+    st.session_state.keywords = []
+if "citation_meta" not in st.session_state:
+    st.session_state.citation_meta = {}
+
+# ---------------------------- 辅助函数 ----------------------------
+def add_message(role, content):
+    st.session_state.chat_history.append({"role": role, "content": content})
 
 def detect_language(text):
     try:
@@ -25,9 +89,8 @@ def detect_language(text):
     except:
         return 'en'
 
-def get_text_from_pdf(uploaded_file):
+def extract_text_from_pdf(uploaded_file):
     text = ""
-    metadata = {}
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.read())
         tmp_path = tmp.name
@@ -37,21 +100,16 @@ def get_text_from_pdf(uploaded_file):
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-            if pdf.metadata:
-                metadata = pdf.metadata
-    except:
-        try:
+        if not text.strip():  # 回退到 PyPDF2
             reader = PdfReader(tmp_path)
-            if reader.metadata:
-                metadata = reader.metadata
             for page in reader.pages:
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n"
-        except Exception as e:
-            st.error(f"PDF读取失败: {e}")
+    except Exception as e:
+        st.error(f"PDF读取错误: {e}")
     os.unlink(tmp_path)
-    return text.strip(), metadata
+    return text.strip()
 
 def get_summary(text, lang, sentence_count=4):
     try:
@@ -79,6 +137,7 @@ def extract_keywords(text, lang, num_keywords=3):
         return []
 
 def format_citations(authors, title, year, journal, volume, pages):
+    # 简化的格式化，支持中英文作者
     author_list = []
     for item in authors.split(';'):
         name = item.strip()
@@ -135,79 +194,178 @@ def format_citations(authors, title, year, journal, volume, pages):
     mla_cite += f", {year}."
     return apa_cite, mla_cite
 
-# 页面布局
-input_method = st.radio("选择输入方式", ("粘贴文本", "上传PDF文件"))
+# ---------------------------- 对话逻辑 ----------------------------
+def process_user_input(user_input):
+    """根据当前步骤处理用户输入，返回助手回复（文本）"""
+    global st_state
+    step = st.session_state.step
 
-text = ""
-if input_method == "粘贴文本":
-    text = st.text_area("请输入论文全文", height=300)
-else:
-    uploaded = st.file_uploader("上传PDF文件", type="pdf")
-    if uploaded:
-        with st.spinner("提取PDF文本..."):
-            text, meta = get_text_from_pdf(uploaded)
-        if text:
-            st.success(f"提取成功，共 {len(text)} 字符")
+    # 开始：选择模式
+    if step == "start":
+        if user_input == "1":
+            st.session_state.step = "await_text"
+            return "请直接粘贴论文文本（支持多行），粘贴完成后在下方输入框内单行输入：**END** 并发送。"
+        elif user_input == "2":
+            st.session_state.step = "await_pdf"
+            return "请使用下方的文件上传器上传 PDF 文件（仅支持文字型PDF）。"
         else:
-            st.error("PDF无法提取文字，请检查是否扫描版")
+            return "请输入数字 1 或 2：\n1️⃣ 粘贴文本\n2️⃣ 上传 PDF 文件"
 
-if text:
+    # 等待文本输入（多行，以END结束）
+    elif step == "await_text":
+        if user_input.strip().upper() == "END":
+            text = st.session_state.pending_text
+            if not text:
+                return "文本内容为空。请重新选择模式（1或2）。"
+            st.session_state.paper_text = text
+            st.session_state.step = "analyzing"
+            return analyze_paper(text)
+        else:
+            # 累积文本
+            if "pending_text" not in st.session_state:
+                st.session_state.pending_text = ""
+            st.session_state.pending_text += user_input + "\n"
+            return f"已接收文本片段（当前共 {len(st.session_state.pending_text)} 字符），继续粘贴，输入 END 结束。"
+
+    # 等待 PDF 上传
+    elif step == "await_pdf":
+        # 这个步骤实际上不通过文本输入处理，而是通过单独的 file_uploader 组件
+        return None  # 不产生回复，由外部上传触发
+
+    # 分析完成后，等待元数据
+    elif step == "await_metadata":
+        # 用户输入的是某个元数据字段的值
+        meta = st.session_state.citation_meta
+        # 记录当前正在请求的字段
+        if "meta_field" not in st.session_state:
+            st.session_state.meta_field = "title"
+        field = st.session_state.meta_field
+        meta[field] = user_input
+        # 切换到下一个字段
+        if field == "title":
+            st.session_state.meta_field = "authors"
+            return "请输入作者（多个作者用英文分号 ; 分隔，例如：Zhang, Wei; Li, Ming）"
+        elif field == "authors":
+            st.session_state.meta_field = "year"
+            return "请输入发表年份（如 2024）"
+        elif field == "year":
+            st.session_state.meta_field = "journal"
+            return "请输入期刊或会议名称"
+        elif field == "journal":
+            st.session_state.meta_field = "volume"
+            return "请输入卷号（如果没有，直接回复 无）"
+        elif field == "volume":
+            vol = user_input.strip()
+            if vol.lower() in ["无", "none", ""]:
+                meta["volume"] = ""
+            else:
+                meta["volume"] = vol
+            st.session_state.meta_field = "pages"
+            return "请输入页码（例如 123-130，如果没有，回复 无）"
+        elif field == "pages":
+            pages = user_input.strip()
+            if pages.lower() in ["无", "none", ""]:
+                meta["pages"] = ""
+            else:
+                meta["pages"] = pages
+            # 所有信息收集完毕，生成引用
+            apa, mla = format_citations(
+                meta.get("authors", ""),
+                meta.get("title", ""),
+                meta.get("year", ""),
+                meta.get("journal", ""),
+                meta.get("volume", ""),
+                meta.get("pages", "")
+            )
+            result = (
+                f"✅ 分析完成！\n\n"
+                f"📌 核心观点：\n{st.session_state.summary_core}\n\n"
+                f"🔑 关键发现/论点：\n" + "\n".join([f"{i+1}. {kw}" for i, kw in enumerate(st.session_state.keywords)]) + "\n\n"
+                f"📄 详细摘要：\n{st.session_state.summary_detail}\n\n"
+                f"📖 参考文献：\nAPA: {apa}\nMLA: {mla}\n\n"
+                f"你可以继续上传新的论文，或输入「新对话」重置。"
+            )
+            st.session_state.step = "done"
+            return result
+
+    # 已完成，可以重置
+    elif step == "done":
+        if user_input.strip() == "新对话":
+            # 重置所有状态
+            for key in ["step", "paper_text", "paper_lang", "summary_core", "summary_detail", "keywords", "citation_meta", "pending_text", "meta_field"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.session_state.step = "start"
+            st.session_state.chat_history = []
+            return "✨ 已重置。请选择输入方式：\n1️⃣ 粘贴文本\n2️⃣ 上传 PDF 文件"
+        else:
+            return "请回复「新对话」开始处理下一篇论文。"
+
+    return "我有点困惑，请重新开始（刷新页面）"
+
+def analyze_paper(text):
     lang = detect_language(text)
-    st.info(f"检测到语言：{'中文' if lang=='zh' else '英文'}")
-    with st.spinner("生成摘要和关键词..."):
-        sentences = get_summary(text, lang)
-        core = sentences[0] if sentences else ""
-        detail = " ".join(sentences[1:4]) if len(sentences) > 1 else ""
-        keywords = extract_keywords(text, lang)
+    st.session_state.paper_lang = lang
+    sentences = get_summary(text, lang)
+    core = sentences[0] if sentences else "无法生成摘要"
+    detail = " ".join(sentences[1:4]) if len(sentences) > 1 else ""
+    keywords = extract_keywords(text, lang)
+    st.session_state.summary_core = core
+    st.session_state.summary_detail = detail
+    st.session_state.keywords = keywords
+    st.session_state.step = "await_metadata"
+    st.session_state.citation_meta = {}
+    st.session_state.meta_field = "title"
+    return (
+        f"🔍 语言检测：{'中文' if lang=='zh' else '英文'}\n"
+        f"摘要与关键词已生成。\n\n"
+        f"接下来需要您补充论文的发表信息，以便生成标准引用。\n"
+        f"请输入论文标题："
+    )
 
-    st.markdown("### 📖 引用信息（用于生成APA/MLA）")
-    col1, col2 = st.columns(2)
-    with col1:
-        title = st.text_input("标题")
-        authors = st.text_input("作者（多作者用分号;分隔）")
-        year = st.text_input("发表年份")
-    with col2:
-        journal = st.text_input("期刊/会议名称")
-        volume = st.text_input("卷号（可选）")
-        pages = st.text_input("页码（可选）")
-
-    if title and authors and year and journal:
-        apa, mla = format_citations(authors, title, year, journal, volume, pages)
+# ---------------------------- 渲染聊天界面 ----------------------------
+# 显示历史消息
+for msg in st.session_state.chat_history:
+    if msg["role"] == "user":
+        st.markdown(f"<div style='display: flex; justify-content: flex-end;'><div class='chat-message-user'>🧑‍🎓 {msg['content']}</div></div>", unsafe_allow_html=True)
     else:
-        apa = mla = "请填写完整的标题、作者、年份、期刊"
+        st.markdown(f"<div style='display: flex; justify-content: flex-start;'><div class='chat-message-assistant'>🤖 {msg['content']}</div></div>", unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.markdown("### 📌 核心观点")
-    st.write(core if core else "（未能生成）")
+# 特殊处理：如果当前步骤是 await_pdf，显示文件上传组件
+if st.session_state.step == "await_pdf":
+    uploaded_file = st.file_uploader("📄 上传 PDF 文件", type="pdf", key="pdf_uploader")
+    if uploaded_file:
+        with st.spinner("正在提取 PDF 文本..."):
+            text = extract_text_from_pdf(uploaded_file)
+            if text:
+                add_message("assistant", f"✅ PDF 已读取，共 {len(text)} 字符。正在分析...")
+                # 直接分析
+                response = analyze_paper(text)
+                add_message("assistant", response)
+                st.rerun()
+            else:
+                st.error("PDF 无法提取文字，请尝试文本模式。")
 
-    st.markdown("### 🔑 关键发现/论点")
-    for i, kw in enumerate(keywords, 1):
-        st.write(f"{i}. {kw}")
+# 用户输入框（放在底部固定）
+with st.container():
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        user_input = st.text_input("", placeholder="在这里输入...", key="user_input", label_visibility="collapsed")
+    with col2:
+        send_btn = st.button("发送")
 
-    st.markdown("### 📄 详细摘要")
-    st.write(detail if detail else "（未能生成）")
+if send_btn and user_input.strip():
+    # 添加用户消息
+    add_message("user", user_input)
+    # 处理并获取助手回复
+    assistant_reply = process_user_input(user_input.strip())
+    if assistant_reply:
+        add_message("assistant", assistant_reply)
+    # 清空输入框并刷新
+    st.rerun()
 
-    st.markdown("### 📖 参考文献")
-    st.markdown(f"**APA**  \n{apa}")
-    st.markdown(f"**MLA**  \n{mla}")
-
-    md_content = f"""# 文献伴侣分析报告
-生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-## 核心观点
-{core}
-
-## 关键发现/论点
-{chr(10).join([f"{i+1}. {kw}" for i,kw in enumerate(keywords)])}
-
-## 详细摘要
-{detail}
-
-## 参考文献
-**APA**  
-{apa}
-
-**MLA**  
-{mla}
-"""
-    st.download_button("📥 下载报告 (Markdown)", md_content, file_name=f"文献伴侣_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md", mime="text/markdown")
+# 初始欢迎消息（如果没有历史）
+if len(st.session_state.chat_history) == 0:
+    welcome = "你好！我是文献伴侣智能体，你可以粘贴论文文本或上传PDF，我会为你生成摘要、关键词和引用格式。\n\n请选择输入方式：\n1️⃣ 粘贴文本\n2️⃣ 上传 PDF 文件"
+    add_message("assistant", welcome)
+    st.rerun()
