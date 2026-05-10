@@ -6,3 +6,5 @@ yake
 nltk
 langdetect
 jieba
+deep-translator
+reportlab
