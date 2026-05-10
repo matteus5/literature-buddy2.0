@@ -25,7 +25,6 @@ from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.tmt.v20180321 import tmt_client, models
 
-# 设置 langdetect 种子，保证结果一致
 DetectorFactory.seed = 0
 
 # ---------- 页面配置 ----------
@@ -83,11 +82,9 @@ def add_message(role, content):
     st.session_state.history.append({"role": role, "content": content})
 
 def detect_language(text):
-    """改进的语言检测，对短文本更可靠"""
     if not text or len(text.strip()) < 10:
-        return "en"  # 默认英文
+        return "en"
     try:
-        # 取前500字符检测
         sample = text[:500].replace('\n', ' ')
         lang = detect(sample)
         if lang.startswith('zh'):
@@ -95,7 +92,6 @@ def detect_language(text):
         else:
             return 'en'
     except LangDetectException:
-        # 后备：检查是否包含中文字符
         if re.search(r'[\u4e00-\u9fff]', text):
             return 'zh'
         return 'en'
@@ -122,12 +118,12 @@ def extract_text_from_pdf(uploaded_file):
     os.unlink(tmp_path)
     return text.strip()
 
-# ---------------- 腾讯云翻译（分块处理，解决长文本问题） ----------------
+# ---------- 腾讯云翻译（修正语言代码为小写） ----------
 def translate_single_chunk(text, src, tgt, client):
     req = models.TextTranslateRequest()
     req.SourceText = text
-    req.Source = src.upper()
-    req.Target = tgt.upper()
+    req.Source = src   # 已经是小写 'en' 或 'zh'
+    req.Target = tgt
     req.ProjectId = 0
     resp = client.TextTranslate(req)
     return resp.TargetText
@@ -135,7 +131,6 @@ def translate_single_chunk(text, src, tgt, client):
 def split_text_into_chunks(text, max_len=5900):
     if len(text) <= max_len:
         return [text]
-    # 按句子分割（中英文都适用的简单分割）
     sentences = re.split(r'(?<=[。！？!?.])\s*', text)
     chunks = []
     current_chunk = ""
@@ -154,11 +149,10 @@ def split_text_into_chunks(text, max_len=5900):
     return chunks
 
 def translate_text(text, src_lang, target_lang):
-    """翻译文本，自动分块处理长文本"""
     if not text or not text.strip():
         return ""
 
-    # 确保源语言和目标语言正确映射
+    # 确保源语言和目标语言为小写
     if src_lang == 'zh' and target_lang == 'en':
         src = 'zh'
         tgt = 'en'
@@ -170,7 +164,7 @@ def translate_text(text, src_lang, target_lang):
         src = 'en'
         tgt = 'zh'
 
-    # 获取密钥（优先从 st.secrets，其次环境变量）
+    # 获取密钥
     secret_id = None
     secret_key = None
     try:
@@ -181,7 +175,7 @@ def translate_text(text, src_lang, target_lang):
         secret_key = os.environ.get("TENCENT_SECRET_KEY")
 
     if not secret_id or not secret_key:
-        return "[错误] 未找到腾讯云 API 密钥，请在 Streamlit Cloud 的 Secrets 中配置"
+        return "[错误] 未找到腾讯云 API 密钥"
 
     try:
         cred = credential.Credential(secret_id, secret_key)
@@ -307,16 +301,13 @@ def extract_keywords(text, lang, num_keywords=3):
         return [w for w, c in common]
 
 def analyze_paper_bilingual(text):
-    # 检测原文语言
     lang = detect_language(text)
     st.session_state.paper_lang = lang
     sentences = get_summary(text, lang)
     core = sentences[0] if sentences else "（无法生成摘要）"
     detail = " ".join(sentences[1:4]) if len(sentences) > 1 else ""
     kw = extract_keywords(text, lang)
-    # 确定目标语言
     target = "zh" if lang == "en" else "en"
-    # 翻译
     core_trans = translate_text(core, lang, target)
     detail_trans = translate_text(detail, lang, target)
     kw_trans = [translate_text(k, lang, target) for k in kw]
