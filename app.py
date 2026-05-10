@@ -13,64 +13,32 @@ import yake
 import jieba
 import tempfile
 import os
-import hashlib
-import hmac
-import json
-import requests
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.lib import colors
 import io
+from tencentcloud.common import credential
+from tencentcloud.common.profile.client_profile import ClientProfile
+from tencentcloud.common.profile.http_profile import HttpProfile
+from tencentcloud.tmt.v20180321 import tmt_client, models
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="文献伴侣·双语版", page_icon="📚", layout="centered")
-
 st.markdown("""
 <style>
-    html, body, .stApp, .stApp * {
-        color: #1e293b !important;
-    }
-    .stTextInput input, .stTextArea textarea, .stSelectbox select {
-        color: #1e293b !important;
-        background-color: #ffffff !important;
-    }
-    .stButton button {
-        color: #1e293b !important;
-        background-color: #f0f2f6 !important;
-        border: 1px solid #cbd5e1 !important;
-    }
+    html, body, .stApp, .stApp * { color: #1e293b !important; }
+    .stTextInput input, .stTextArea textarea, .stSelectbox select { color: #1e293b !important; background-color: #ffffff !important; }
+    .stButton button { color: #1e293b !important; background-color: #f0f2f6 !important; border: 1px solid #cbd5e1 !important; }
     #MainMenu {visibility: hidden;}
     header {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display: none;}
-    .stActionButton {display: none;}
-    .stStatusWidget {display: none;}
-    .viewerBadge_link__qRIco {display: none;}
     [data-testid="stToolbar"] {display: none;}
-    [data-testid="stDecoration"] {display: none;}
-    .chat-message-user {
-        background-color: #dbeafe;
-        padding: 12px;
-        border-radius: 20px;
-        margin-bottom: 12px;
-        max-width: 80%;
-        align-self: flex-end;
-        color: #1e293b !important;
-    }
-    .chat-message-assistant {
-        background-color: #f1f5f9;
-        padding: 12px;
-        border-radius: 20px;
-        margin-bottom: 12px;
-        max-width: 80%;
-        align-self: flex-start;
-        color: #1e293b !important;
-    }
-    h1, h2, h3 {
-        color: #0f172a !important;
-    }
+    .chat-message-user { background-color: #dbeafe; padding: 12px; border-radius: 20px; margin-bottom: 12px; max-width: 80%; align-self: flex-end; color: #1e293b !important; }
+    .chat-message-assistant { background-color: #f1f5f9; padding: 12px; border-radius: 20px; margin-bottom: 12px; max-width: 80%; align-self: flex-start; color: #1e293b !important; }
+    h1, h2, h3 { color: #0f172a !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -107,7 +75,6 @@ if "current_missing_idx" not in st.session_state:
 if "final_meta" not in st.session_state:
     st.session_state.final_meta = {}
 
-# ---------- 辅助函数 ----------
 def add_message(role, content):
     st.session_state.history.append({"role": role, "content": content})
 
@@ -140,97 +107,48 @@ def extract_text_from_pdf(uploaded_file):
     os.unlink(tmp_path)
     return text.strip()
 
-# ---------- 新：腾讯云翻译函数 ----------
+# ---------------- 腾讯云翻译（使用官方SDK，稳定可靠） ----------------
 def translate_text(text, src_lang, target_lang):
-    """使用腾讯云翻译 API 进行文本翻译。"""
+    """使用腾讯云 SDK 翻译文本，自动处理签名，返回译文"""
     if not text or not text.strip():
         return ""
 
-    # 映射语言代码
-    source_lang = 'zh' if src_lang == 'zh' else 'en'
-    target_lang = 'zh' if target_lang == 'en' else 'en'
+    # 映射语言代码（腾讯云要求大写）
+    src = 'zh' if src_lang == 'zh' else 'en'
+    tgt = 'zh' if target_lang == 'en' else 'en'
 
-    # 优先从环境变量读取密钥（Zeabur 部署推荐）
-    secret_id = os.environ.get("TENCENT_SECRET_ID")
-    secret_key = os.environ.get("TENCENT_SECRET_KEY")
+    # 获取密钥（优先从 Streamlit secrets，其次从环境变量）
+    secret_id = None
+    secret_key = None
+    try:
+        secret_id = st.secrets["TENCENT_SECRET_ID"]
+        secret_key = st.secrets["TENCENT_SECRET_KEY"]
+    except:
+        secret_id = os.environ.get("TENCENT_SECRET_ID")
+        secret_key = os.environ.get("TENCENT_SECRET_KEY")
 
-    # 备用：直接填写（仅本地测试使用，切勿上传公开仓库）
-    # ⚠️ 请替换为你的真实密钥
     if not secret_id or not secret_key:
-        secret_id = "AKIDqETWMzOabTBVcVBh06zfIivvkcR4Lk07"    # 改成你的
-        secret_key = "BHEzYyDJF1ocJtLeoncI8pMjtpZ6S7iD"  # 改成你的
-
-    payload = {
-        "SourceText": text,
-        "Source": source_lang.upper(),
-        "Target": target_lang.upper(),
-        "ProjectId": 0
-    }
-    service = "tmt"
-    host = "tmt.tencentcloudapi.com"
-    action = "TextTranslate"
-    version = "2018-03-21"
-    region = "ap-guangzhou"
-
-    timestamp = int(datetime.now().timestamp())
-    http_request_method = "POST"
-    canonical_uri = "/"
-    canonical_querystring = ""
-    ct = "application/json; charset=utf-8"
-    payload_str = json.dumps(payload)
-    canonical_headers = f"content-type:{ct}\nhost:{host}\nx-tc-action:{action.lower()}\n"
-    signed_headers = "content-type;host;x-tc-action"
-    hashed_request_payload = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
-    canonical_request = (http_request_method + "\n" +
-                        canonical_uri + "\n" +
-                        canonical_querystring + "\n" +
-                        canonical_headers + "\n" +
-                        signed_headers + "\n" +
-                        hashed_request_payload)
-
-    algorithm = "TC3-HMAC-SHA256"
-    date = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
-    credential_scope = f"{date}/{service}/tc3_request"
-    hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
-    string_to_sign = (algorithm + "\n" +
-                     str(timestamp) + "\n" +
-                     credential_scope + "\n" +
-                     hashed_canonical_request)
-
-    def sign(key, msg):
-        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
-    secret_date = sign(("TC3" + secret_key).encode("utf-8"), date)
-    secret_service = sign(secret_date, service)
-    secret_signing = sign(secret_service, "tc3_request")
-    signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    authorization = (algorithm + " " +
-                    "Credential=" + secret_id + "/" + credential_scope + ", " +
-                    "SignedHeaders=" + signed_headers + ", " +
-                    "Signature=" + signature)
-
-    headers = {
-        "Authorization": authorization,
-        "Content-Type": ct,
-        "Host": host,
-        "X-TC-Action": action,
-        "X-TC-Timestamp": str(timestamp),
-        "X-TC-Version": version,
-        "X-TC-Region": region
-    }
+        return "[错误] 未找到腾讯云 API 密钥，请在 Streamlit Cloud 的 Secrets 中配置 TENCENT_SECRET_ID 和 TENCENT_SECRET_KEY"
 
     try:
-        response = requests.post(f"https://{host}", headers=headers, data=payload_str)
-        result = response.json()
-        if "Response" in result and "TargetText" in result["Response"]:
-            return result["Response"]["TargetText"]
-        else:
-            st.warning(f"翻译服务返回错误: {result}")
-            return f"[翻译失败] {text}"
+        cred = credential.Credential(secret_id, secret_key)
+        http_profile = HttpProfile()
+        http_profile.endpoint = "tmt.tencentcloudapi.com"
+        client_profile = ClientProfile()
+        client_profile.httpProfile = http_profile
+        client = tmt_client.TmtClient(cred, "ap-guangzhou", client_profile)
+
+        req = models.TextTranslateRequest()
+        req.SourceText = text
+        req.Source = src.upper()
+        req.Target = tgt.upper()
+        req.ProjectId = 0
+
+        resp = client.TextTranslate(req)
+        return resp.TargetText
     except Exception as e:
-        st.warning(f"翻译请求异常: {e}")
-        return f"[翻译出错] {text}"
+        st.error(f"翻译接口调用失败: {str(e)}")
+        return f"[翻译失败] {text[:50]}..."
 
 # ---------- 自动元数据提取 ----------
 def extract_title(text):
@@ -350,7 +268,6 @@ def analyze_paper_bilingual(text):
     kw_trans = [translate_text(k, lang, target) for k in kw]
     return core, core_trans, detail, detail_trans, kw, kw_trans, lang
 
-# ---------- 格式化引用 ----------
 def format_citations(meta):
     authors = meta.get("authors", "")
     title = meta.get("title", "")
@@ -372,14 +289,12 @@ def format_citations(meta):
     mla += f", {year}."
     return apa, mla
 
-# ---------- 生成左右对照 PDF ----------
 def generate_dual_pdf(original_text, translated_text, title):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4,
                             leftMargin=20*mm, rightMargin=20*mm,
                             topMargin=20*mm, bottomMargin=20*mm)
     styles = getSampleStyleSheet()
-    
     def split_paragraphs(text, max_chars=400):
         paras = []
         for p in text.split('\n'):
@@ -387,7 +302,6 @@ def generate_dual_pdf(original_text, translated_text, title):
             if p:
                 paras.append(p)
         return paras
-    
     left_paras = split_paragraphs(original_text)
     right_paras = split_paragraphs(translated_text)
     max_rows = max(len(left_paras), len(right_paras))
@@ -395,11 +309,9 @@ def generate_dual_pdf(original_text, translated_text, title):
         left_paras.append("")
     while len(right_paras) < max_rows:
         right_paras.append("")
-    
     data = [["原文 (Original)", "译文 (Translation)"]]
     for l, r in zip(left_paras, right_paras):
         data.append([Paragraph(l, styles['Normal']), Paragraph(r, styles['Normal'])])
-    
     table = Table(data, colWidths=[doc.width/2.0, doc.width/2.0])
     table.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,0), colors.grey),
@@ -414,7 +326,6 @@ def generate_dual_pdf(original_text, translated_text, title):
     buffer.seek(0)
     return buffer
 
-# ---------- 交互流程 ----------
 def process_menu_choice(choice):
     if choice == "1":
         st.session_state.step = "wait_text"
@@ -441,10 +352,7 @@ def process_text_submit(text):
     st.session_state.auto_meta = auto_meta
     st.session_state.final_meta = auto_meta.copy()
     required_fields = ["title", "authors", "year", "journal"]
-    missing = []
-    for field in required_fields:
-        if not auto_meta.get(field):
-            missing.append(field)
+    missing = [f for f in required_fields if not auto_meta.get(f)]
     st.session_state.missing_fields = missing
     st.session_state.current_missing_idx = 0
     lang_name = "英文" if lang == "en" else "中文"
@@ -499,14 +407,13 @@ def ask_next_missing():
         st.session_state.step = "done"
         return result
 
-# ---------- 渲染对话 ----------
+# ---------- 界面渲染 ----------
 for msg in st.session_state.history:
     if msg["role"] == "user":
         st.markdown(f"<div style='display:flex; justify-content:flex-end'><div class='chat-message-user'>🧑‍🎓 {msg['content']}</div></div>", unsafe_allow_html=True)
     else:
         st.markdown(f"<div style='display:flex; justify-content:flex-start'><div class='chat-message-assistant'>🤖 {msg['content']}</div></div>", unsafe_allow_html=True)
 
-# ---------- 主逻辑 ----------
 if st.session_state.step == "menu":
     with st.form(key="menu_form"):
         choice = st.text_input("请输入数字选择：\n1️⃣ 粘贴文本\n2️⃣ 上传 PDF", key="menu_choice")
@@ -519,7 +426,7 @@ if st.session_state.step == "menu":
 
 elif st.session_state.step == "wait_text":
     with st.form(key="text_form"):
-        paper_text = st.text_area("请粘贴论文全文", height=300, key="paper_text_input")
+        paper_text = st.text_area("请粘贴论文全文", height=300)
         submitted = st.form_submit_button("提交文本")
         if submitted:
             response = process_text_submit(paper_text)
@@ -546,10 +453,7 @@ elif st.session_state.step == "ask_missing":
             "journal": "📚 请输入期刊/会议名称"
         }[field]
         user_val = st.text_input(prompt, key=f"missing_{field}")
-        col1, col2 = st.columns([1, 5])
-        with col1:
-            btn = st.button("下一步")
-        if btn and user_val:
+        if st.button("下一步") and user_val:
             val = user_val.strip()
             st.session_state.final_meta[field] = val
             st.session_state.current_missing_idx += 1
@@ -588,11 +492,8 @@ elif st.session_state.step == "done":
             st.rerun()
     with st.form(key="reset_form"):
         reset = st.text_input("或者输入「新对话」重置", key="reset_cmd")
-        submitted = st.form_submit_button("重置")
-        if submitted and reset.strip() == "新对话":
+        if st.form_submit_button("重置") and reset.strip() == "新对话":
             for key in list(st.session_state.keys()):
                 if key not in ["_streamlit_config", "_is_running_with_streamlit"]:
                     del st.session_state[key]
             st.rerun()
-        elif submitted:
-            st.warning("请输入「新对话」")
