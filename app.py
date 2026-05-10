@@ -3,7 +3,8 @@ import pdfplumber
 from PyPDF2 import PdfReader
 import re
 from datetime import datetime
-from langdetect import detect
+from langdetect import detect, DetectorFactory
+from langdetect.lang_detect_exception import LangDetectException
 from sumy.parsers.plaintext import PlaintextParser
 from sumy.nlp.tokenizers import Tokenizer
 from sumy.summarizers.lsa import LsaSummarizer
@@ -23,6 +24,9 @@ from tencentcloud.common import credential
 from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
 from tencentcloud.tmt.v20180321 import tmt_client, models
+
+# 设置 langdetect 种子，保证结果一致
+DetectorFactory.seed = 0
 
 # ---------- 页面配置 ----------
 st.set_page_config(page_title="文献伴侣·双语版", page_icon="📚", layout="centered")
@@ -79,10 +83,21 @@ def add_message(role, content):
     st.session_state.history.append({"role": role, "content": content})
 
 def detect_language(text):
+    """改进的语言检测，对短文本更可靠"""
+    if not text or len(text.strip()) < 10:
+        return "en"  # 默认英文
     try:
-        lang = detect(text[:500])
-        return 'zh' if lang.startswith('zh') else 'en'
-    except:
+        # 取前500字符检测
+        sample = text[:500].replace('\n', ' ')
+        lang = detect(sample)
+        if lang.startswith('zh'):
+            return 'zh'
+        else:
+            return 'en'
+    except LangDetectException:
+        # 后备：检查是否包含中文字符
+        if re.search(r'[\u4e00-\u9fff]', text):
+            return 'zh'
         return 'en'
 
 def extract_text_from_pdf(uploaded_file):
@@ -109,7 +124,6 @@ def extract_text_from_pdf(uploaded_file):
 
 # ---------------- 腾讯云翻译（分块处理，解决长文本问题） ----------------
 def translate_single_chunk(text, src, tgt, client):
-    """翻译单个文本块（不超过6000字符）"""
     req = models.TextTranslateRequest()
     req.SourceText = text
     req.Source = src.upper()
@@ -119,7 +133,6 @@ def translate_single_chunk(text, src, tgt, client):
     return resp.TargetText
 
 def split_text_into_chunks(text, max_len=5900):
-    """将长文本按句子边界分割成多个块，每块不超过max_len"""
     if len(text) <= max_len:
         return [text]
     # 按句子分割（中英文都适用的简单分割）
@@ -145,10 +158,19 @@ def translate_text(text, src_lang, target_lang):
     if not text or not text.strip():
         return ""
 
-    src = 'zh' if src_lang == 'zh' else 'en'
-    tgt = 'zh' if target_lang == 'en' else 'en'
+    # 确保源语言和目标语言正确映射
+    if src_lang == 'zh' and target_lang == 'en':
+        src = 'zh'
+        tgt = 'en'
+    elif src_lang == 'en' and target_lang == 'zh':
+        src = 'en'
+        tgt = 'zh'
+    else:
+        # 默认英文到中文
+        src = 'en'
+        tgt = 'zh'
 
-    # 获取密钥
+    # 获取密钥（优先从 st.secrets，其次环境变量）
     secret_id = None
     secret_key = None
     try:
@@ -169,7 +191,6 @@ def translate_text(text, src_lang, target_lang):
         client_profile.httpProfile = http_profile
         client = tmt_client.TmtClient(cred, "ap-guangzhou", client_profile)
 
-        # 分块处理
         chunks = split_text_into_chunks(text, max_len=5900)
         translated_chunks = []
         for chunk in chunks:
@@ -286,13 +307,16 @@ def extract_keywords(text, lang, num_keywords=3):
         return [w for w, c in common]
 
 def analyze_paper_bilingual(text):
+    # 检测原文语言
     lang = detect_language(text)
     st.session_state.paper_lang = lang
     sentences = get_summary(text, lang)
     core = sentences[0] if sentences else "（无法生成摘要）"
     detail = " ".join(sentences[1:4]) if len(sentences) > 1 else ""
     kw = extract_keywords(text, lang)
+    # 确定目标语言
     target = "zh" if lang == "en" else "en"
+    # 翻译
     core_trans = translate_text(core, lang, target)
     detail_trans = translate_text(detail, lang, target)
     kw_trans = [translate_text(k, lang, target) for k in kw]
