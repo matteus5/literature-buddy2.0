@@ -13,12 +13,15 @@ import yake
 import jieba
 import tempfile
 import os
-from deep_translator import GoogleTranslator
+import hashlib
+import hmac
+import json
+import requests
 from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT
+from reportlab.lib import colors
 import io
 
 # ---------- 页面配置 ----------
@@ -42,7 +45,11 @@ st.markdown("""
     header {visibility: hidden;}
     footer {visibility: hidden;}
     .stDeployButton {display: none;}
+    .stActionButton {display: none;}
+    .stStatusWidget {display: none;}
+    .viewerBadge_link__qRIco {display: none;}
     [data-testid="stToolbar"] {display: none;}
+    [data-testid="stDecoration"] {display: none;}
     .chat-message-user {
         background-color: #dbeafe;
         padding: 12px;
@@ -133,7 +140,99 @@ def extract_text_from_pdf(uploaded_file):
     os.unlink(tmp_path)
     return text.strip()
 
-# ---------- 自动元数据提取 (同前) ----------
+# ---------- 新：腾讯云翻译函数 ----------
+def translate_text(text, src_lang, target_lang):
+    """使用腾讯云翻译 API 进行文本翻译。"""
+    if not text or not text.strip():
+        return ""
+
+    # 映射语言代码
+    source_lang = 'zh' if src_lang == 'zh' else 'en'
+    target_lang = 'zh' if target_lang == 'en' else 'en'
+
+    # 优先从环境变量读取密钥（Zeabur 部署推荐）
+    secret_id = os.environ.get("TENCENT_SECRET_ID")
+    secret_key = os.environ.get("TENCENT_SECRET_KEY")
+
+    # 备用：直接填写（仅本地测试使用，切勿上传公开仓库）
+    # ⚠️ 请替换为你的真实密钥
+    if not secret_id or not secret_key:
+        secret_id = "AKIDqETWMzOabTBVcVBh06zfIivvkcR4Lk07"    # 改成你的
+        secret_key = "BHEzYyDJF1ocJtLeoncI8pMjtpZ6S7iD"  # 改成你的
+
+    payload = {
+        "SourceText": text,
+        "Source": source_lang.upper(),
+        "Target": target_lang.upper(),
+        "ProjectId": 0
+    }
+    service = "tmt"
+    host = "tmt.tencentcloudapi.com"
+    action = "TextTranslate"
+    version = "2018-03-21"
+    region = "ap-guangzhou"
+
+    timestamp = int(datetime.now().timestamp())
+    http_request_method = "POST"
+    canonical_uri = "/"
+    canonical_querystring = ""
+    ct = "application/json; charset=utf-8"
+    payload_str = json.dumps(payload)
+    canonical_headers = f"content-type:{ct}\nhost:{host}\nx-tc-action:{action.lower()}\n"
+    signed_headers = "content-type;host;x-tc-action"
+    hashed_request_payload = hashlib.sha256(payload_str.encode("utf-8")).hexdigest()
+    canonical_request = (http_request_method + "\n" +
+                        canonical_uri + "\n" +
+                        canonical_querystring + "\n" +
+                        canonical_headers + "\n" +
+                        signed_headers + "\n" +
+                        hashed_request_payload)
+
+    algorithm = "TC3-HMAC-SHA256"
+    date = datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d")
+    credential_scope = f"{date}/{service}/tc3_request"
+    hashed_canonical_request = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    string_to_sign = (algorithm + "\n" +
+                     str(timestamp) + "\n" +
+                     credential_scope + "\n" +
+                     hashed_canonical_request)
+
+    def sign(key, msg):
+        return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+
+    secret_date = sign(("TC3" + secret_key).encode("utf-8"), date)
+    secret_service = sign(secret_date, service)
+    secret_signing = sign(secret_service, "tc3_request")
+    signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    authorization = (algorithm + " " +
+                    "Credential=" + secret_id + "/" + credential_scope + ", " +
+                    "SignedHeaders=" + signed_headers + ", " +
+                    "Signature=" + signature)
+
+    headers = {
+        "Authorization": authorization,
+        "Content-Type": ct,
+        "Host": host,
+        "X-TC-Action": action,
+        "X-TC-Timestamp": str(timestamp),
+        "X-TC-Version": version,
+        "X-TC-Region": region
+    }
+
+    try:
+        response = requests.post(f"https://{host}", headers=headers, data=payload_str)
+        result = response.json()
+        if "Response" in result and "TargetText" in result["Response"]:
+            return result["Response"]["TargetText"]
+        else:
+            st.warning(f"翻译服务返回错误: {result}")
+            return f"[翻译失败] {text}"
+    except Exception as e:
+        st.warning(f"翻译请求异常: {e}")
+        return f"[翻译出错] {text}"
+
+# ---------- 自动元数据提取 ----------
 def extract_title(text):
     lines = text.split('\n')
     for line in lines[:15]:
@@ -202,7 +301,7 @@ def auto_extract_metadata(text):
         "pages": extract_volume_pages(text)[1]
     }
 
-# ---------- 摘要和关键词 (双语) ----------
+# ---------- 摘要和关键词 ----------
 def get_summary(text, lang, sentence_count=4):
     try:
         if lang == 'zh':
@@ -236,23 +335,6 @@ def extract_keywords(text, lang, num_keywords=3):
         from collections import Counter
         common = Counter(words).most_common(num_keywords)
         return [w for w, c in common]
-
-def translate_text(text, src_lang, target_lang):
-    """使用 deep-translator 进行翻译，分段避免过长"""
-    if not text:
-        return ""
-    try:
-        translator = GoogleTranslator(source=src_lang, target=target_lang)
-        # 如果文本过长，分段翻译
-        if len(text) > 5000:
-            parts = [text[i:i+4000] for i in range(0, len(text), 4000)]
-            translated_parts = [translator.translate(part) for part in parts]
-            return "".join(translated_parts)
-        else:
-            return translator.translate(text)
-    except Exception as e:
-        st.warning(f"翻译失败: {e}")
-        return "[翻译出错]"
 
 def analyze_paper_bilingual(text):
     lang = detect_language(text)
@@ -292,30 +374,13 @@ def format_citations(meta):
 
 # ---------- 生成左右对照 PDF ----------
 def generate_dual_pdf(original_text, translated_text, title):
-    """生成左右对照 PDF，左侧原文，右侧译文"""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4,
                             leftMargin=20*mm, rightMargin=20*mm,
                             topMargin=20*mm, bottomMargin=20*mm)
     styles = getSampleStyleSheet()
-    # 自定义中文支持（reportlab默认不支持中文，需注册字体，这里使用内置字体替代，显示可能不完美）
-    # 为了简单，使用默认字体，但中文可能显示为方框。解决办法：使用中文字体文件。
-    # 更好的方案：提示用户安装中文字体，或使用 matplotlib。但为了部署简单，我们使用 reportlab 的默认字体，
-    # 在 Streamlit Cloud 上可能无法显示中文。因此我们提供一个更简单的方法：生成两列文本的表格？
-    # 这里采用两列分别输出 Paragraph，使用支持中文的字体。
-    # 由于 Streamlit Cloud 环境没有中文字体，我们改用比较简单的方案：生成纯文本对照？但用户要求 PDF。
-    # 替代：生成 Markdown 表格然后转 PDF? 复杂。我们使用 fpdf 但也不支持中文。
-    # 实际部署时，用户可看到英文，中文可能乱码。为解决，建议用户本地有中文字体。
-    # 这里我们使用 reportlab 注册思源黑体（需要下载），但部署环境可能没有。
-    # 为了演示，我们生成一个简单的表格样式，中文部分可能为方框，但用户可以接受至少能看到英文。
-    # 更可靠：使用 weasyprint 但依赖多。因此这里使用简单方式，并在界面上提示。
-    # 创建一个两列的表格
-    from reportlab.platypus import Table, TableStyle
-    from reportlab.lib import colors
     
-    # 分段
     def split_paragraphs(text, max_chars=400):
-        # 简单按句子分割
         paras = []
         for p in text.split('\n'):
             p = p.strip()
@@ -325,15 +390,13 @@ def generate_dual_pdf(original_text, translated_text, title):
     
     left_paras = split_paragraphs(original_text)
     right_paras = split_paragraphs(translated_text)
-    # 对齐行数
     max_rows = max(len(left_paras), len(right_paras))
     while len(left_paras) < max_rows:
         left_paras.append("")
     while len(right_paras) < max_rows:
         right_paras.append("")
     
-    # 构建表格数据
-    data = [["原文", "译文"]]
+    data = [["原文 (Original)", "译文 (Translation)"]]
     for l, r in zip(left_paras, right_paras):
         data.append([Paragraph(l, styles['Normal']), Paragraph(r, styles['Normal'])])
     
@@ -377,7 +440,6 @@ def process_text_submit(text):
     st.session_state.keywords_trans = kw_trans
     st.session_state.auto_meta = auto_meta
     st.session_state.final_meta = auto_meta.copy()
-    # 检查缺失字段
     required_fields = ["title", "authors", "year", "journal"]
     missing = []
     for field in required_fields:
@@ -385,7 +447,6 @@ def process_text_submit(text):
             missing.append(field)
     st.session_state.missing_fields = missing
     st.session_state.current_missing_idx = 0
-    # 构建双语结果显示
     lang_name = "英文" if lang == "en" else "中文"
     target_name = "中文" if lang == "en" else "英文"
     result = (f"🔍 检测到原文语言：{lang_name}\n\n"
@@ -406,7 +467,6 @@ def process_text_submit(text):
         result += f"\n⚠️ 以下信息未提取到，请补充：\n" + "\n".join([f"- {missing_names[f]}" for f in missing])
         st.session_state.step = "ask_missing"
     else:
-        # 完整，生成引用
         apa, mla = format_citations(auto_meta)
         result += f"\n📖 参考文献：\nAPA: {apa}\nMLA: {mla}\n"
         st.session_state.step = "done"
@@ -502,7 +562,6 @@ elif st.session_state.step == "ask_missing":
         st.rerun()
 
 elif st.session_state.step == "done":
-    # 提供翻译和 PDF 生成按钮
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
@@ -522,13 +581,11 @@ elif st.session_state.step == "done":
             else:
                 st.warning("没有论文文本，请先上传或粘贴论文。")
     with col2:
-        # 重置按钮
         if st.button("🔄 新对话"):
             for key in list(st.session_state.keys()):
                 if key not in ["_streamlit_config", "_is_running_with_streamlit"]:
                     del st.session_state[key]
             st.rerun()
-    # 保留原来的重置输入框作为备用
     with st.form(key="reset_form"):
         reset = st.text_input("或者输入「新对话」重置", key="reset_cmd")
         submitted = st.form_submit_button("重置")
