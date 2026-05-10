@@ -14,12 +14,6 @@ import yake
 import jieba
 import tempfile
 import os
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet
-from reportlab.lib.units import mm
-from reportlab.lib import colors
-import io
 from tencentcloud.common import credential
 from tencentcloud.common.profile.client_profile import ClientProfile
 from tencentcloud.common.profile.http_profile import HttpProfile
@@ -118,15 +112,43 @@ def extract_text_from_pdf(uploaded_file):
     os.unlink(tmp_path)
     return text.strip()
 
-# ---------- 腾讯云翻译（修正语言代码为小写） ----------
+# ---------- 腾讯云翻译（带重试） ----------
+from functools import wraps
+import time
+from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
+
+def retry_on_internal_error(max_retries=3):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except TencentCloudSDKException as e:
+                    if "InternalError" in e.code and attempt < max_retries - 1:
+                        wait_time = (2 ** attempt) + 0.1
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise e
+                except Exception as e:
+                    raise e
+            raise last_exception
+        return wrapper
+    return decorator
+
 def translate_single_chunk(text, src, tgt, client):
-    req = models.TextTranslateRequest()
-    req.SourceText = text
-    req.Source = src   # 已经是小写 'en' 或 'zh'
-    req.Target = tgt
-    req.ProjectId = 0
-    resp = client.TextTranslate(req)
-    return resp.TargetText
+    @retry_on_internal_error(max_retries=3)
+    def _call():
+        req = models.TextTranslateRequest()
+        req.SourceText = text
+        req.Source = src
+        req.Target = tgt
+        req.ProjectId = 0
+        resp = client.TextTranslate(req)
+        return resp.TargetText
+    return _call()
 
 def split_text_into_chunks(text, max_len=5900):
     if len(text) <= max_len:
@@ -151,8 +173,6 @@ def split_text_into_chunks(text, max_len=5900):
 def translate_text(text, src_lang, target_lang):
     if not text or not text.strip():
         return ""
-
-    # 确保源语言和目标语言为小写
     if src_lang == 'zh' and target_lang == 'en':
         src = 'zh'
         tgt = 'en'
@@ -160,11 +180,8 @@ def translate_text(text, src_lang, target_lang):
         src = 'en'
         tgt = 'zh'
     else:
-        # 默认英文到中文
         src = 'en'
         tgt = 'zh'
-
-    # 获取密钥
     secret_id = None
     secret_key = None
     try:
@@ -173,10 +190,8 @@ def translate_text(text, src_lang, target_lang):
     except:
         secret_id = os.environ.get("TENCENT_SECRET_ID")
         secret_key = os.environ.get("TENCENT_SECRET_KEY")
-
     if not secret_id or not secret_key:
         return "[错误] 未找到腾讯云 API 密钥"
-
     try:
         cred = credential.Credential(secret_id, secret_key)
         http_profile = HttpProfile()
@@ -184,7 +199,6 @@ def translate_text(text, src_lang, target_lang):
         client_profile = ClientProfile()
         client_profile.httpProfile = http_profile
         client = tmt_client.TmtClient(cred, "ap-guangzhou", client_profile)
-
         chunks = split_text_into_chunks(text, max_len=5900)
         translated_chunks = []
         for chunk in chunks:
@@ -334,43 +348,108 @@ def format_citations(meta):
     mla += f", {year}."
     return apa, mla
 
-def generate_dual_pdf(original_text, translated_text, title):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4,
-                            leftMargin=20*mm, rightMargin=20*mm,
-                            topMargin=20*mm, bottomMargin=20*mm)
-    styles = getSampleStyleSheet()
-    def split_paragraphs(text, max_chars=400):
-        paras = []
-        for p in text.split('\n'):
-            p = p.strip()
-            if p:
-                paras.append(p)
-        return paras
+# ---------- 生成 HTML 对照文件（替代 PDF，完美显示中文） ----------
+def generate_dual_html(original_text, translated_text, title):
+    # 将原文和译文按段落分割
+    def split_paragraphs(text):
+        # 按空行分割段落
+        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
+        if not paragraphs:
+            # 如果没有空行，按换行分割
+            paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+        return paragraphs
+    
     left_paras = split_paragraphs(original_text)
     right_paras = split_paragraphs(translated_text)
     max_rows = max(len(left_paras), len(right_paras))
+    # 补齐
     while len(left_paras) < max_rows:
         left_paras.append("")
     while len(right_paras) < max_rows:
         right_paras.append("")
-    data = [["原文 (Original)", "译文 (Translation)"]]
+    
+    # 构建 HTML 表格
+    html = f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>{title} - 双语对照</title>
+<style>
+    body {{
+        font-family: "Microsoft YaHei", "SimHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+        margin: 40px auto;
+        max-width: 1200px;
+        padding: 20px;
+        background: #f9fafb;
+    }}
+    h1 {{
+        text-align: center;
+        color: #1e293b;
+    }}
+    .info {{
+        text-align: center;
+        color: #475569;
+        margin-bottom: 30px;
+    }}
+    table {{
+        width: 100%;
+        border-collapse: collapse;
+        background: white;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }}
+    th {{
+        background: #334155;
+        color: white;
+        padding: 12px;
+        font-size: 1.1em;
+        border: 1px solid #475569;
+    }}
+    td {{
+        vertical-align: top;
+        padding: 16px;
+        border: 1px solid #cbd5e1;
+        line-height: 1.6;
+    }}
+    .original {{
+        background-color: #fefce8;
+    }}
+    .translation {{
+        background-color: #e0f2fe;
+    }}
+    footer {{
+        text-align: center;
+        margin-top: 30px;
+        color: #64748b;
+        font-size: 0.9em;
+    }}
+</style>
+</head>
+<body>
+<h1>📄 {title}</h1>
+<div class="info">生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} | 左右对照阅读</div>
+<table>
+<thead>
+<tr>
+    <th style="width:50%">原文 (Original)</th>
+    <th style="width:50%">译文 (Translation)</th>
+</tr>
+</thead>
+<tbody>
+"""
     for l, r in zip(left_paras, right_paras):
-        data.append([Paragraph(l, styles['Normal']), Paragraph(r, styles['Normal'])])
-    table = Table(data, colWidths=[doc.width/2.0, doc.width/2.0])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.grey),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-        ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
-        ('FONTSIZE', (0,0), (-1,-1), 9),
-    ]))
-    doc.build([table])
-    buffer.seek(0)
-    return buffer
+        l_escaped = l.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        r_escaped = r.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        html += f"<tr>\n<td class='original'>{l_escaped or '&nbsp;'}</td>\n<td class='translation'>{r_escaped or '&nbsp;'}</td>\n</tr>\n"
+    html += f"""
+</tbody>
+</table>
+<footer>文献伴侣智能体生成 | 华师大学习工具</footer>
+</body>
+</html>
+"""
+    return html.encode("utf-8")
 
+# ---------- 交互流程 ----------
 def process_menu_choice(choice):
     if choice == "1":
         st.session_state.step = "wait_text"
@@ -514,18 +593,18 @@ elif st.session_state.step == "done":
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🌐 生成双语对照 PDF"):
+        if st.button("🌐 生成双语对照 HTML"):
             if st.session_state.paper_text:
-                with st.spinner("正在翻译全文并生成 PDF..."):
+                with st.spinner("正在翻译全文并生成 HTML..."):
                     src_lang = st.session_state.paper_lang
                     tgt_lang = "zh" if src_lang == "en" else "en"
                     full_trans = translate_text(st.session_state.paper_text, src_lang, tgt_lang)
-                    pdf_buffer = generate_dual_pdf(st.session_state.paper_text, full_trans, st.session_state.final_meta.get("title", "论文"))
+                    html_data = generate_dual_html(st.session_state.paper_text, full_trans, st.session_state.final_meta.get("title", "论文"))
                     st.download_button(
-                        label="📥 下载对照 PDF",
-                        data=pdf_buffer,
-                        file_name=f"bilingual_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                        mime="application/pdf"
+                        label="📥 下载对照 HTML（打开即看，可打印）",
+                        data=html_data,
+                        file_name=f"bilingual_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html",
+                        mime="text/html"
                     )
             else:
                 st.warning("没有论文文本，请先上传或粘贴论文。")
